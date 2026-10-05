@@ -1,54 +1,60 @@
 /*
-  =====================================================================
-  MEMBER 4 - COMMUNICATION & POWER (standalone test sketch, ROBOT side)
-  Robot 1 - Wi-Fi Access Point + UDP protocol
-  =====================================================================
-  Purpose: Prove out the Wi-Fi AP + UDP link on its own, in both
-  directions, before anyone's motors/sensors/actuators are wired in.
-  Matches build guide steps 1-5: create AP, connect remote, one-way
-  UDP, then two-way UDP.
+  =============================================================================
+   BATTLEBOT - ROBOT-SIDE COMMUNICATIONS MODULE (Member 4)
+  =============================================================================
+   Platform : ESP32 (Arduino framework)
+   Role     : Wi-Fi access point + UDP link between the handheld controller
+             and the robot.
+ 
+   Data flow:
+       Controller --[ControlPacket, UDP :4210]--> Robot  (joystick + buttons)
+       Robot      --[TelemetryPacket, UDP :4211]--> Controller (status data)
+ 
+   Design notes:
+    - The robot hosts its own Wi-Fi network (no external router needed), so the link works anywhere, including competition arenas.
+    - UDP is used instead of TCP: it is connectionless and has no retransmission delay. For real-time control, a fresh packet is always
+      more useful than a reliably-delivered old one.
+    - A failsafe timeout detects a dead link so the robot can stop safely.
+ 
+   Status: TEST HARNESS. Health, battery, sensors and motor control are
+   stubbed out and will be merged in from the other team members' modules.
+ =============================================================================
+ */
 
-  Run this sketch on the ROBOT's ESP32 at the same time as
-  Member4_Remote_Comm_Test.ino runs on the REMOTE's ESP32.
 
-  WHAT IT DOES:
-    - Creates the BATTLEBOT_R1 access point.
-    - Listens for a ControlPacket from the remote and prints it.
-    - Sends a TelemetryPacket back with a fake/incrementing health
-      value so Member 5 (OLED) and Member 4 (remote side) can verify
-      the round trip without needing real sensors yet.
-    - Implements the comms failsafe: if no packet arrives within
-      LINK_TIMEOUT_MS, it prints "LINK LOST" (stands in for "stop
-      motors" until Member 1's code is merged in).
-
-  This packet struct is the CONTRACT between Robot1.ino and
-  Remote1.ino — keep it byte-for-byte identical in both, and in the
-  final Overall_Final files.
-
-  TODO CONFIRM: SSID/password, UDP ports, LINK_TIMEOUT_MS (Section 17).
-  =====================================================================
-*/
-
-#include <WiFi.h>
-#include <WiFiUdp.h>
+#include <WiFi.h> // ESP32 Wi-Fi stack (access point / station modes)
+#include <WiFiUdp.h>  // UDP socket wrapper
+// -----------------------------------------------------------------------------
+//  NETWORK CONFIGURATION
+// -----------------------------------------------------------------------------
 
 const char* AP_SSID     = "BATTLEBOT_R1";
 const char* AP_PASSWORD = "battlebit1";
-IPAddress apIP(192, 168, 4, 1);
-IPAddress apGateway(192, 168, 4, 1);
-IPAddress apSubnet(255, 255, 255, 0);
+IPAddress apIP(192, 168, 4, 1);  
+IPAddress apGateway(192, 168, 4, 1); // Robot is its own gateway
+IPAddress apSubnet(255, 255, 255, 0); // /24 network (254 usable addresses)
 
+// Separate ports per direction keep the two data streams cleanly separated.
 const uint16_t CONTROL_PORT   = 4210;
 const uint16_t TELEMETRY_PORT = 4211;
+
+// -----------------------------------------------------------------------------
+//  TIMING CONFIGURATION
+// -----------------------------------------------------------------------------
 const unsigned long LINK_TIMEOUT_MS = 400;
 const unsigned long TELEMETRY_INTERVAL_MS = 100;
 
-WiFiUDP udp;
-IPAddress remoteIP;
-bool remoteIPKnown = false;
-unsigned long lastPacketTime = 0;
-unsigned long lastTelemetryTime = 0;
+// -----------------------------------------------------------------------------
+//  RUNTIME STATE
+// -----------------------------------------------------------------------------
 
+WiFiUDP udp; // Single UDP socket used for RX and TX
+IPAddress remoteIP; // Controller's address
+bool remoteIPKnown = false; // False until a controller has contacted
+unsigned long lastPacketTime = 0; // millis() timestamp of last valid RX
+unsigned long lastTelemetryTime = 0; // millis() timestamp of last TX
+
+// Controller -> Robot: operator input.
 struct ControlPacket {
   uint32_t seq;
   int16_t  joyX;
@@ -59,6 +65,7 @@ struct ControlPacket {
   uint8_t  pb4;
 };
 
+// Robot -> Controller: status report shown on the operator's display.
 struct TelemetryPacket {
   uint32_t seq;
   int16_t  health;
@@ -73,6 +80,9 @@ struct TelemetryPacket {
 
 int16_t fakeHealth = 100; // stand-in until Member 3's code is merged in
 
+// =============================================================================
+//  SETUP: runs once at boot
+// =============================================================================
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -94,7 +104,7 @@ void loop() {
 }
 
 void handleIncoming() {
-  int packetSize = udp.parsePacket();
+  int packetSize = udp.parsePacket(); // Returns 0 if nothing has arrived
   if (packetSize == sizeof(ControlPacket)) {
     ControlPacket pkt;
     udp.read((uint8_t*)&pkt, sizeof(pkt));
@@ -120,7 +130,7 @@ void checkFailsafe() {
 
 void sendTelemetryIfDue() {
   unsigned long now = millis();
-  if (!remoteIPKnown) return;
+  if (!remoteIPKnown) return; // No one to send to yet
   if (now - lastTelemetryTime < TELEMETRY_INTERVAL_MS) return;
   lastTelemetryTime = now;
 
@@ -136,7 +146,8 @@ void sendTelemetryIfDue() {
   t.servoState = 0;
   t.robotState = 0;
   t.linkOK = (now - lastPacketTime <= LINK_TIMEOUT_MS) ? 1 : 0;
-
+  
+// Transmit the struct as raw bytes to the controller's telemetry port.
   udp.beginPacket(remoteIP, TELEMETRY_PORT);
   udp.write((uint8_t*)&t, sizeof(t));
   udp.endPacket();
